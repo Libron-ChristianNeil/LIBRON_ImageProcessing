@@ -9,7 +9,7 @@ namespace LIBRON_ImageProcessing
 {
     public partial class Form1 : Form
     {
-        private Bitmap originalImage;
+        private Bitmap? originalImage;
         private Bitmap processedImage;
         private Bitmap foreground;
         private Bitmap background;
@@ -19,7 +19,6 @@ namespace LIBRON_ImageProcessing
         private Device currentDevice;
         private bool isWebcamRunning = false;
         private Bitmap latestWebcamFrame;
-
         private System.Windows.Forms.Timer webcamTimer;
 
         public Form1()
@@ -50,11 +49,239 @@ namespace LIBRON_ImageProcessing
             btnLoadWebcamBackground.Click += BtnLoadWebcamBackground_Click;
             btnApplyGreenScreen.Click += BtnApplyGreenScreen_Click;
 
+            btnApplyConvolution.Click += (s, e) =>
+            {
+                if (comboBoxFilters.SelectedItem != null)
+                {
+                    string filterName = comboBoxFilters.SelectedItem.ToString();
+                    ApplyConvolutionFilter(filterName, iterations: 3);
+                }
+                else
+                {
+                    MessageBox.Show("Please select a convolution filter from the list.");
+                }
+            };
+
+
             // Menu
             editingModeItem.Click += (s, e) => SwitchToMode("Editing");
             subtractionModeItem.Click += (s, e) => SwitchToMode("Subtraction");
             webcamModeItem.Click += (s, e) => SwitchToMode("Webcam");
         }
+
+        // -------------------------------
+        // CONVOLUTION SUPPORT
+        // -------------------------------
+        public class ConvMatrix
+        {
+            public int TopLeft = 0, TopMid = 0, TopRight = 0;
+            public int MidLeft = 0, Pixel = 1, MidRight = 0;
+            public int BottomLeft = 0, BottomMid = 0, BottomRight = 0;
+            public int Factor = 1;
+            public int Offset = 0;
+
+            public void SetAll(int nVal)
+            {
+                TopLeft = TopMid = TopRight = MidLeft = Pixel = MidRight =
+                          BottomLeft = BottomMid = BottomRight = nVal;
+            }
+        }
+
+        public static bool Conv3x3(Bitmap b, ConvMatrix m)
+        {
+            if (m.Factor == 0) return false;
+
+            Bitmap bSrc = (Bitmap)b.Clone();
+            BitmapData bmData = b.LockBits(new Rectangle(0, 0, b.Width, b.Height),
+                                ImageLockMode.ReadWrite,
+                                PixelFormat.Format24bppRgb);
+            BitmapData bmSrc = bSrc.LockBits(new Rectangle(0, 0, bSrc.Width, bSrc.Height),
+                                 ImageLockMode.ReadWrite,
+                                 PixelFormat.Format24bppRgb);
+
+            int stride = bmData.Stride;
+            int stride2 = stride * 2;
+            IntPtr Scan0 = bmData.Scan0;
+            IntPtr SrcScan0 = bmSrc.Scan0;
+
+            unsafe
+            {
+                byte* p = (byte*)(void*)Scan0;
+                byte* pSrc = (byte*)(void*)SrcScan0;
+
+                int nOffset = stride - b.Width * 3;
+                int nWidth = b.Width - 2;
+                int nHeight = b.Height - 2;
+
+                int nPixel;
+
+                for (int y = 0; y < nHeight; ++y)
+                {
+                    for (int x = 0; x < nWidth; ++x)
+                    {
+                        // Blue
+                        nPixel = (((pSrc[2] * m.TopLeft) +
+                                   (pSrc[5] * m.TopMid) +
+                                   (pSrc[8] * m.TopRight) +
+                                   (pSrc[2 + stride] * m.MidLeft) +
+                                   (pSrc[5 + stride] * m.Pixel) +
+                                   (pSrc[8 + stride] * m.MidRight) +
+                                   (pSrc[2 + stride2] * m.BottomLeft) +
+                                   (pSrc[5 + stride2] * m.BottomMid) +
+                                   (pSrc[8 + stride2] * m.BottomRight))
+                                   / m.Factor) + m.Offset;
+
+                        nPixel = Math.Min(Math.Max(nPixel, 0), 255);
+                        p[5 + stride] = (byte)nPixel;
+
+                        // Green
+                        nPixel = (((pSrc[1] * m.TopLeft) +
+                                   (pSrc[4] * m.TopMid) +
+                                   (pSrc[7] * m.TopRight) +
+                                   (pSrc[1 + stride] * m.MidLeft) +
+                                   (pSrc[4 + stride] * m.Pixel) +
+                                   (pSrc[7 + stride] * m.MidRight) +
+                                   (pSrc[1 + stride2] * m.BottomLeft) +
+                                   (pSrc[4 + stride2] * m.BottomMid) +
+                                   (pSrc[7 + stride2] * m.BottomRight))
+                                   / m.Factor) + m.Offset;
+
+                        nPixel = Math.Min(Math.Max(nPixel, 0), 255);
+                        p[4 + stride] = (byte)nPixel;
+
+                        // Red
+                        nPixel = (((pSrc[0] * m.TopLeft) +
+                                   (pSrc[3] * m.TopMid) +
+                                   (pSrc[6] * m.TopRight) +
+                                   (pSrc[0 + stride] * m.MidLeft) +
+                                   (pSrc[3 + stride] * m.Pixel) +
+                                   (pSrc[6 + stride] * m.MidRight) +
+                                   (pSrc[0 + stride2] * m.BottomLeft) +
+                                   (pSrc[3 + stride2] * m.BottomMid) +
+                                   (pSrc[6 + stride2] * m.BottomRight))
+                                   / m.Factor) + m.Offset;
+
+                        nPixel = Math.Min(Math.Max(nPixel, 0), 255);
+                        p[3 + stride] = (byte)nPixel;
+
+                        p += 3;
+                        pSrc += 3;
+                    }
+                    p += nOffset;
+                    pSrc += nOffset;
+                }
+            }
+
+            b.UnlockBits(bmData);
+            bSrc.UnlockBits(bmSrc);
+            return true;
+        }
+
+        // Filters
+        public static bool Smooth(Bitmap b, int weight = 1)
+        {
+            ConvMatrix m = new ConvMatrix();
+            m.SetAll(1);
+            m.Pixel = 2;
+            m.Factor = 2 + 8;
+            return Conv3x3(b, m);
+        }
+
+        public static bool GaussianBlur(Bitmap b)
+        {
+            ConvMatrix m = new ConvMatrix();
+            m.TopLeft = m.TopRight = m.BottomLeft = m.BottomRight = 1;
+            m.TopMid = m.MidLeft = m.MidRight = m.BottomMid = 2;
+            m.Pixel = 4;
+            m.Factor = 16;
+            return Conv3x3(b, m);
+        }
+
+        public static bool Sharpen(Bitmap b)
+        {
+            ConvMatrix m = new ConvMatrix();
+            m.Pixel = 11;
+            m.TopMid = m.MidLeft = m.MidRight = m.BottomMid = -2;
+            m.Factor = 3;
+            return Conv3x3(b, m);
+        }
+
+        public static bool MeanRemoval(Bitmap b)
+        {
+            ConvMatrix m = new ConvMatrix();
+            m.SetAll(-1);
+            m.Pixel = 9;
+            m.Factor = 1;
+            return Conv3x3(b, m);
+        }
+
+        public static bool Emboss(Bitmap b)
+        {
+            ConvMatrix m = new ConvMatrix();
+            m.SetAll(0);
+            m.TopLeft = m.TopRight = m.BottomLeft = m.BottomRight = -1;
+            m.Pixel = 4;
+            m.Offset = 127;
+            m.Factor = 1;
+            return Conv3x3(b, m);
+        }
+
+        private void ApplyConvolutionFilter(string filterType, int iterations = 1)
+        {
+            if (processedImage == null) return;
+
+            Bitmap temp = (Bitmap)processedImage.Clone();
+            bool success = true;
+
+            try
+            {
+                for (int i = 0; i < iterations; i++)
+                {
+                    switch (filterType)
+                    {
+                        case "Smooth":
+                            success &= Smooth(temp);
+                            break;
+                        case "Gaussian":
+                            success &= GaussianBlur(temp);
+                            break;
+                        case "Sharpen":
+                            success &= Sharpen(temp);
+                            break;
+                        case "Mean Removal":
+                            success &= MeanRemoval(temp);
+                            break;
+                        case "Emboss":
+                            success &= Emboss(temp);
+                            break;
+                        default:
+                            success = false;
+                            break;
+                    }
+                }
+
+                if (success)
+                {
+                    processedImage.Dispose();
+                    processedImage = temp;
+
+                    var old = pictureBoxProcessed.Image as Bitmap;
+                    pictureBoxProcessed.Image = (Bitmap)processedImage.Clone();
+                    old?.Dispose();
+                }
+                else
+                {
+                    temp.Dispose();
+                    MessageBox.Show("Unknown or failed convolution filter.");
+                }
+            }
+            catch (Exception ex)
+            {
+                temp.Dispose();
+                MessageBox.Show($"Error applying convolution filter: {ex.Message}");
+            }
+        }
+
 
         private void InitializeWebcam()
         {
@@ -214,16 +441,13 @@ namespace LIBRON_ImageProcessing
 
             try
             {
-                // Try DrawToBitmap first (works when control is a standard control)
                 ctl.DrawToBitmap(bmp, new Rectangle(0, 0, bmp.Width, bmp.Height));
                 return bmp;
             }
             catch
             {
-                // DrawToBitmap can fail for some HWND-drawn content. Fallback to screen capture.
                 try
                 {
-                    // Get screen coordinates of the control
                     Point screenP = ctl.PointToScreen(Point.Empty);
                     using (Graphics g = Graphics.FromImage(bmp))
                     {
@@ -248,22 +472,18 @@ namespace LIBRON_ImageProcessing
                     MessageBox.Show("Webcam is not running or no frame captured.");
                     return;
                 }
-
-                // Prefer processed frame if available
                 Bitmap toUse = null;
                 if (pictureBoxWebcamProcessed.Image != null)
                     toUse = new Bitmap(pictureBoxWebcamProcessed.Image);
                 else
                     toUse = new Bitmap(latestWebcamFrame);
 
-                // Dispose previous originals
                 originalImage?.Dispose();
                 processedImage?.Dispose();
 
                 originalImage = toUse;
                 processedImage = new Bitmap(originalImage);
 
-                // Update UI (dispose earlier images)
                 var oldOrig = pictureBoxOriginal.Image as Bitmap;
                 pictureBoxOriginal.Image = originalImage;
                 oldOrig?.Dispose();
@@ -317,10 +537,8 @@ namespace LIBRON_ImageProcessing
                 return;
             }
 
-            // Apply one-shot green screen (fast)
             var result = ApplyGreenScreenFast(latestWebcamFrame, webcamBackground, GetSensitivity());
 
-            // swap into pictureBoxWebcamProcessed safely
             var old = pictureBoxWebcamProcessed.Image as Bitmap;
             pictureBoxWebcamProcessed.Image = result;
             old?.Dispose();
@@ -339,13 +557,11 @@ namespace LIBRON_ImageProcessing
             }
         }
 
-        // Public wrapper matching previous method name
         private Bitmap ApplyGreenScreen(Bitmap foreground, Bitmap background)
         {
             return ApplyGreenScreenFast(foreground, background, GetSensitivity());
         }
 
-        // Fast implementation using LockBits. Returns a new Bitmap.
         private Bitmap ApplyGreenScreenFast(Bitmap fg, Bitmap bg, int sensitivity)
         {
             if (fg == null || bg == null) return null;
@@ -353,7 +569,6 @@ namespace LIBRON_ImageProcessing
             int width = Math.Min(fg.Width, bg.Width);
             int height = Math.Min(fg.Height, bg.Height);
 
-            // Ensure both bitmaps are in 24bppRgb for easier processing
             using (Bitmap fg24 = ConvertTo24bpp(fg))
             using (Bitmap bg24 = ConvertTo24bpp(bg))
             {
@@ -415,7 +630,6 @@ namespace LIBRON_ImageProcessing
             }
         }
 
-        // Convert any bitmap to 24bppRgb clone for consistent LockBits operations
         private Bitmap ConvertTo24bpp(Bitmap src)
         {
             if (src.PixelFormat == PixelFormat.Format24bppRgb)
@@ -485,7 +699,6 @@ namespace LIBRON_ImageProcessing
                     Color fgColor = foreground.GetPixel(x, y);
                     Color bgColor = background.GetPixel(x, y);
 
-                    // Detect “green” (adjust thresholds to suit your image)
                     bool isGreen = fgColor.G > 120 && fgColor.R < 120 && fgColor.B < 120;
 
                     if (isGreen)
@@ -719,7 +932,6 @@ namespace LIBRON_ImageProcessing
 
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            // Stop timer and dispose resources
             try
             {
                 if (webcamTimer != null) webcamTimer.Stop();
